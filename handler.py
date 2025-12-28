@@ -224,12 +224,37 @@ def check_server(url, retries=500, delay=50):
     return False
 
 
+def _is_url(string):
+    """Check if a string is a URL (http or https)."""
+    return string.startswith("http://") or string.startswith("https://")
+
+
+def _get_content_type_from_response(response, name):
+    """Extract content type from response headers or infer from filename."""
+    content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
+    if content_type and content_type.startswith("image/"):
+        return content_type
+    # Fallback: infer from filename extension
+    ext = name.lower().rsplit(".", 1)[-1] if "." in name else "png"
+    ext_to_mime = {
+        "png": "image/png",
+        "jpg": "image/jpg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "bmp": "image/bmp",
+    }
+    return ext_to_mime.get(ext, "image/png")
+
+
 def upload_images(images):
     """
-    Upload a list of base64 encoded images to the ComfyUI server using the /upload/image endpoint.
+    Upload a list of images to the ComfyUI server using the /upload/image endpoint.
 
     Args:
-        images (list): A list of dictionaries, each containing the 'name' of the image and the 'image' as a base64 encoded string.
+        images (list): A list of dictionaries, each containing the 'name' of the image and the 'image'
+                       which can be either a base64 encoded string (with or without data URI prefix)
+                       or a URL (http/https) to download the image from (e.g., S3 URL).
 
     Returns:
         dict: A dictionary indicating success or error.
@@ -245,22 +270,34 @@ def upload_images(images):
     for image in images:
         try:
             name = image["name"]
-            image_data_uri = image["image"]  # Get the full string (might have prefix)
+            image_data = image["image"]  # Get the full string (might be URL or base64)
 
-            # --- Strip Data URI prefix if present ---
-            if "," in image_data_uri:
-                # Find the comma and take everything after it
-                base64_data = image_data_uri.split(",", 1)[1]
+            # --- Determine if it's a URL or base64 data ---
+            if _is_url(image_data):
+                # Download image from URL (e.g., S3 URL)
+                print(f"worker-comfyui - Downloading image from URL for {name}...")
+                download_response = requests.get(image_data, timeout=60)
+                download_response.raise_for_status()
+                blob = download_response.content
+                content_type = _get_content_type_from_response(download_response, name)
             else:
-                # Assume it's already pure base64
-                base64_data = image_data_uri
-            # --- End strip ---
+                # Handle as base64 data URI
+                # --- Strip Data URI prefix if present ---
+                if "," in image_data:
+                    # Find the comma and take everything after it
+                    base64_data = image_data.split(",", 1)[1]
+                else:
+                    # Assume it's already pure base64
+                    base64_data = image_data
+                # --- End strip ---
 
-            blob = base64.b64decode(base64_data)  # Decode the cleaned data
+                blob = base64.b64decode(base64_data)  # Decode the cleaned data
+                content_type = "image/png"
+            # --- End URL vs base64 handling ---
 
             # Prepare the form data
             files = {
-                "image": (name, BytesIO(blob), "image/png"),
+                "image": (name, BytesIO(blob), content_type),
                 "overwrite": (None, "true"),
             }
 
